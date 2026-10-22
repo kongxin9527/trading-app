@@ -249,33 +249,65 @@ async def heartbeat_task(session):
         await asyncio.sleep(30) # 每 30 秒检查，防止错过整点
 
 async def main_ws_loop():
-    url = "wss://fstream.binance.com/ws/!ticker@arr" 
+    # 使用最新的常规市场数据网关
+    url = "wss://fstream.binance.com/market" 
     
     async with aiohttp.ClientSession() as session:
         # 1. 启动先预热数据
         await pre_heat(session)
         
-        # 2. 发送开机问候（你会立刻在TG收到这条消息，并看到真实的合约数量）
+        # 2. 发送开机问候
         active_count = sum(1 for v in current_volumes.values() if v >= MIN_24H_VOLUME)
         await send_telegram_msg(session, f"🚀 <b>山寨雷达启动成功</b>\n历史数据预热完毕，当前监控中达标合约: {active_count} 个。")
         
-        # 3. 挂载日常心跳与 WebSocket
+        # 3. 挂载日常心跳
         asyncio.create_task(heartbeat_task(session))
+        
+        # 定义用于测试接收状态的计数器
+        msg_count = 0
+        last_count_time = time.time()
         
         while True:
             try:
-                logging.info("正在连接 Binance WebSocket...")
+                logging.info(f"正在连接 Binance 最新 WebSocket 网关: {url} ...")
                 async with websockets.connect(url, ping_interval=20, ping_timeout=20) as ws:
-                    logging.info("实时流接入成功，开始执勤...")
+                    logging.info("网关接入成功，正在发送订阅指令...")
+                    
+                    # 【核心改动】向新接口主动发送订阅全市场 Ticker 的指令
+                    sub_msg = {
+                        "method": "SUBSCRIBE",
+                        "params": ["!ticker@arr"],
+                        "id": 1
+                    }
+                    await ws.send(json.dumps(sub_msg))
+                    logging.info("订阅指令已发送，开始接收实时数据...")
+                    
                     while True:
                         res = await ws.recv()
                         data = json.loads(res)
-                        for ticker in data:
-                            await process_ticker(session, ticker)
-            except Exception as e:
-                logging.error(f"WebSocket 断线: {e}，5秒后重连...")
-                await asyncio.sleep(5)
+                        
+                        # --- 接收状态日志打印 ---
+                        msg_count += 1
+                        now = time.time()
+                        if now - last_count_time >= 60:
+                            logging.info(f"📊 WS流状态正常: 过去 1 分钟共接收 {msg_count} 次数据推送")
+                            msg_count = 0
+                            last_count_time = now
+                        # -----------------------
 
+                        # 过滤掉刚连上时币安返回的 {"result": null, "id": 1} 确认消息
+                        if isinstance(data, dict) and 'result' in data:
+                            continue
+                            
+                        # 如果接收到的是数据列表，开始交给策略处理
+                        if isinstance(data, list):
+                            for ticker in data:
+                                await process_ticker(session, ticker)
+                                
+            except Exception as e:
+                logging.error(f"WebSocket 断线或无响应: {e}，5秒后自动重连...")
+                await asyncio.sleep(5)
+                
 if __name__ == "__main__":
     logging.info("==== 币安山寨异动专业监控系统启动 ====")
     asyncio.run(main_ws_loop())
