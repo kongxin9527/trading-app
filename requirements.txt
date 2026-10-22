@@ -3,3 +3,6 @@ uvicorn
 requests
 pandas
 numpy
+aiohttp==3.9.3
+websockets==12.0
+python-dotenv
